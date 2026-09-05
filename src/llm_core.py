@@ -2310,6 +2310,15 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
         _apply_local_generation_stability(payload, target_url, model)
+        # Reasoning control for Ollama's /v1 surface — same resolver and
+        # precedence as llm_call_async and stream_llm. This path had no
+        # reasoning control at all, so a thinking model spent its whole budget
+        # reasoning on utility calls (document description, search-query
+        # generation) that only ever use the final line.
+        if _is_ollama_openai_compat_url(url):
+            _effort = _resolve_ollama_reasoning_effort(url, model)
+            if _effort is not None:
+                payload["reasoning_effort"] = _effort
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
     try:
