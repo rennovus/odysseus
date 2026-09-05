@@ -383,20 +383,25 @@ async function initDefaultChat() {
   var msg = el('set-defaultChatMsg');
   var _endpoints = [];
 
-  // Fill any <select> with the models for a given endpoint id.
+  // Both selects keep their leading blank "Not set" option (keepBlank=true).
+  // Without it, an empty persisted value left the browser auto-selecting
+  // option[0] — and since the model list is sorted by sortModelIds(), Settings
+  // reported the alphabetically-first model as the configured default while
+  // the composer resolved the endpoint's first model instead. "Not set" is a
+  // real state: the backend falls back to the first available chat model.
   function fillModels(selectEl, epId, selected) {
     var ep = _endpoints.find(function(e) { return e.id === epId; });
-    _fillModelSelect(selectEl, ep ? ep.models : [], selected, false);
+    _fillModelSelect(selectEl, ep ? ep.models : [], selected, true);
   }
 
   try {
     _endpoints = await _fetchModelEndpoints();
-    _fillEndpointSelect(epSel, _endpoints, epSel.value, false);
+    _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
   } catch (e) { console.warn('Failed to load endpoints for default chat', e); }
 
   function refreshModels(selectedModel) { fillModels(modelSel, epSel.value, selectedModel); }
   function refreshEndpointOptions(selectedEndpoint, selectedModel) {
-    _fillEndpointSelect(epSel, _endpoints, selectedEndpoint !== undefined ? selectedEndpoint : epSel.value, false);
+    _fillEndpointSelect(epSel, _endpoints, selectedEndpoint !== undefined ? selectedEndpoint : epSel.value, true);
     refreshModels(selectedModel !== undefined ? selectedModel : modelSel.value);
   }
 
