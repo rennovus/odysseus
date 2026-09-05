@@ -736,6 +736,7 @@ def _build_ollama_payload(
     stream: bool = False,
     tools: Optional[List[Dict]] = None,
     num_ctx: Optional[int] = None,
+    think: Optional[object] = None,
 ) -> Dict:
     """Build the JSON payload for Ollama's /api/chat endpoint.
 
@@ -747,6 +748,13 @@ def _build_ollama_payload(
     the value is trusted (not the ``DEFAULT_CONTEXT`` fallback), so we
     don't guess for unknown models but do tell Ollama the real window
     when we know it — even if it's smaller than 2048.
+
+    ``think`` is the resolved native thinking control: a bool, or a level
+    string for models that only accept levels. It is omitted entirely when
+    None, so a model that does not reason keeps the exact body it gets today.
+    Resolution (daemon capability, overrides, tool-call suppression) lives in
+    ``_resolve_ollama_think``; an unrecognised value is dropped rather than put
+    on the wire.
     """
     payload: Dict = {
         "model": model,
@@ -764,12 +772,28 @@ def _build_ollama_payload(
         payload["options"] = options
     if tools:
         payload["tools"] = _alias_harmony_tools(tools, model)
+    if think is not None:
+        think_value = _normalize_think_value(think)
+        if think_value is not None:
+            payload["think"] = think_value
     return payload
 
 
 def _parse_ollama_response(data: dict) -> str:
+    """Flatten a native Ollama reply to text.
+
+    Reasoning arrives out-of-band in ``message.thinking`` (top-level
+    ``thinking`` on /api/generate). The streaming branch routes it to the
+    thinking channel; there is no channel here, so wrap it in ``<think>`` —
+    the representation the chat UI, persistence, and ``strip_think`` already
+    understand — rather than dropping it or folding it into the answer text.
+    """
     message = data.get("message") or {}
-    return message.get("content") or data.get("response") or ""
+    content = message.get("content") or data.get("response") or ""
+    thinking = message.get("thinking") or data.get("thinking") or ""
+    if thinking:
+        return f"<think>{thinking}</think>\n\n{content}"
+    return content
 
 
 def _host_match(url: str, *domains: str) -> bool:
@@ -1443,11 +1467,264 @@ _THINKING_MODEL_PATTERNS = (
 )
 
 def _supports_thinking(model: str) -> bool:
-    """Check if model supports structured thinking output."""
+    """Check if model supports structured thinking output.
+
+    Name-shape heuristic. Still the control for the OpenAI-compat /v1 dialect
+    and for Mistral's ``reasoning_effort``, but on the native Ollama path it is
+    only the offline fallback — see ``_resolve_ollama_think``.
+    """
     if not model:
         return False
     m = model.lower()
     return any(p in m for p in _THINKING_MODEL_PATTERNS)
+
+
+# ── Native Ollama thinking control ──────────────────────────────────────────
+#
+# Ollama exposes reasoning control on two surfaces with DIFFERENT parameter
+# names and DIFFERENT value vocabularies. Both were read back from a 0.33.3
+# daemon's own 400 messages, not from docs:
+#
+#   native /api/chat        think            true | false | low | medium |
+#                                            high | max
+#   OpenAI-compat /v1       reasoning_effort minimal | low | medium | high |
+#                                            xhigh | ultra | max | none
+#                                            (no bools)
+#
+# They do not overlap cleanly: `xhigh`/`none` are 400s natively, and a bool is
+# a 400 on the compat surface. An out-of-vocabulary value fails the whole
+# request rather than being ignored, so each surface validates against its own
+# list and drops anything it cannot send.
+#
+# The daemon is the source of truth for whether a model reasons at all: POST
+# /api/show reports ``capabilities[]``, where ``thinking`` means the model
+# takes the parameter AND returns reasoning out-of-band (``message.thinking``
+# natively, ``reasoning`` on the compat surface). ``_THINKING_MODEL_PATTERNS``
+# survives only as the fallback for when /api/show cannot be reached.
+
+_OLLAMA_NATIVE_THINK_LEVELS = ("low", "medium", "high", "max")
+_OLLAMA_COMPAT_EFFORT_LEVELS = (
+    "minimal", "low", "medium", "high", "xhigh", "ultra", "max", "none",
+)
+
+# Per-model overrides, for models that need a level string rather than a bool
+# or want a non-default level. Longest matching key wins, so a family key never
+# shadows a tag-specific one (same rule as _lookup_known in model_context.py).
+_OLLAMA_THINK_OVERRIDES: Dict[str, object] = {
+    "muse-glimmer:30b": "medium",
+    "gpt-oss": "medium",
+}
+
+# Floor used when reasoning must be held down but cannot be switched off.
+# Measured on gpt-oss:20b via /v1 (same prompt, reasoning chars returned):
+#   reasoning_effort=none ..... 96      <- "off" is not off, and is the worst
+#   reasoning_effort=minimal .. 29
+#   reasoning_effort=low ...... 25
+#   native think=false ........ 162
+# So "low" is the real floor for a model with no off switch; "none" would both
+# fail to suppress and cost more tokens than asking for the lowest level.
+_OLLAMA_THINK_MIN_LEVEL = "low"
+
+# Suppression value on the compat surface for models that CAN be switched off.
+_OLLAMA_EFFORT_OFF = "none"
+
+# /api/show is a local metadata read; keep the budget tight so a wedged daemon
+# cannot stall a chat request, and cache both outcomes.
+_OLLAMA_SHOW_TIMEOUT = 3.0
+_OLLAMA_SHOW_TTL = 300.0
+_ollama_show_cache: Dict[Tuple[str, str], Tuple[float, Optional[bool]]] = {}
+
+
+def _normalize_think_value(value):
+    """Native ``think``: a bool or a native level string; None otherwise.
+
+    Deliberately narrower than the compat vocabulary — `xhigh`/`none` are a
+    400 here, so an override carrying one is dropped rather than sent.
+    """
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    return text if text in _OLLAMA_NATIVE_THINK_LEVELS else None
+
+
+def _normalize_reasoning_effort(value):
+    """Compat ``reasoning_effort``: a level string; None otherwise.
+
+    The compat surface takes no bools, so True maps to None (omit the
+    parameter and let the model default apply) and False maps to the off
+    level.
+    """
+    if isinstance(value, bool):
+        return _OLLAMA_EFFORT_OFF if value is False else None
+    text = str(value or "").strip().lower()
+    return text if text in _OLLAMA_COMPAT_EFFORT_LEVELS else None
+
+
+def _ollama_think_override(model: str):
+    """Longest-key raw override for ``model``, or None.
+
+    Returns the configured value verbatim — each surface validates it against
+    its own vocabulary, because the two do not agree: `xhigh`/`none` are
+    compat-only and a bool is native-only. Validating here would silently
+    drop a legitimate compat level.
+    """
+    name = (model or "").lower()
+    best_key: Optional[str] = None
+    for key in _OLLAMA_THINK_OVERRIDES:
+        if key in name and (best_key is None or len(key) > len(best_key)):
+            best_key = key
+    if best_key is None:
+        return None
+    return _OLLAMA_THINK_OVERRIDES[best_key]
+
+
+def _ollama_override_for(model: str, normalize, surface: str):
+    """Override for ``model`` validated for one surface, or None.
+
+    An override this surface cannot express is dropped rather than sent — an
+    out-of-vocabulary value is a 400 on the whole request — but it is logged,
+    because a silently ignored reasoning parameter is exactly the failure this
+    code exists to stop.
+    """
+    raw = _ollama_think_override(model)
+    if raw is None:
+        return None
+    value = normalize(raw)
+    if value is None and raw is not True:
+        logger.warning(
+            "Ollama think override %r for %s is not valid on the %s surface — ignoring",
+            raw, model, surface,
+        )
+    return value
+
+
+def _ollama_show_url(url: str) -> str:
+    """POST target for /api/show, derived from the *configured* endpoint.
+
+    The probe has to follow the endpoint the request itself is going to: the
+    daemon is routinely not localhost (Tailscale, LAN, a reverse proxy), so a
+    hardcoded host probes the wrong machine — or nothing at all.
+
+    /api is mounted *beside* the OpenAI-compat surface, not under it, so a
+    configured ``…/v1`` URL has to have that segment rewritten rather than
+    extended: ``http://host:11434/v1`` -> ``http://host:11434/api/show``
+    (``/v1/show`` is a 404). Keep any prefix before ``/v1`` so a proxy that
+    mounts the daemon under a subpath still resolves.
+    """
+    base = (url or "").strip().rstrip("/")
+    parsed = urlparse(base)
+    path = (parsed.path or "").rstrip("/")
+    idx = path.find("/v1")
+    if idx >= 0 and parsed.scheme and parsed.netloc:
+        root = f"{parsed.scheme}://{parsed.netloc}{path[:idx]}/api"
+    else:
+        root = _ollama_api_root(base)
+    return root.rstrip("/") + "/show"
+
+
+def _ollama_native_thinking(url: str, model: str) -> Optional[bool]:
+    """Whether the daemon reports native thinking for ``model`` (cached).
+
+    True/False when /api/show answered, None when it could not be asked — an
+    unreachable daemon, a build without /api/show, or a body we cannot parse.
+    None is cached too, so a daemon that never answers costs one probe per TTL
+    rather than a round trip on every request.
+    """
+    show_url = _ollama_show_url(url)
+    key = (show_url, model)
+    now = time.time()
+    hit = _ollama_show_cache.get(key)
+    if hit and now - hit[0] < _OLLAMA_SHOW_TTL:
+        return hit[1]
+    result: Optional[bool] = None
+    try:
+        from src.tls_overrides import llm_verify
+        from src.model_capability_readers.ollama import thinking_from_show_payload
+        r = httpx.post(
+            show_url,
+            json={"model": model},
+            timeout=_OLLAMA_SHOW_TIMEOUT,
+            verify=llm_verify(),
+        )
+        if r.is_success:
+            result = bool(thinking_from_show_payload(r.json()))
+    except Exception as e:
+        logger.debug("Ollama /api/show probe failed for %s at %s: %s", model, show_url, e)
+    _ollama_show_cache[key] = (now, result)
+    return result
+
+
+def _resolve_ollama_think(url: str, model: str, *, tools: Optional[List[Dict]] = None):
+    """Resolve the native ``think`` value, or None to omit the field.
+
+    Precedence: explicit override > /api/show capability > name-pattern
+    fallback. Omitting the field keeps today's exact body for models that do
+    not reason at all.
+    """
+    native = _ollama_native_thinking(url, model)
+    value = _ollama_override_for(model, _normalize_think_value, "native")
+    if value is None:
+        if native is None:
+            value = True if _supports_thinking(model) else None
+        else:
+            value = True if native else None
+    if value is None or value is False:
+        return value
+    # Tool-call protection. This is the /v1 rationale (reasoning swallowing the
+    # tool call that should have followed it), and it still applies here — but
+    # only when the reasoning lands inline in message.content. A model with a
+    # native thinking channel puts it in message.thinking, and a harmony model
+    # puts it in an analysis channel; the streaming branch demuxes both, so
+    # tools and thinking coexist safely there and there is nothing to suppress.
+    if tools and not native and not _is_harmony_model(model):
+        # Suppression wins over the configured level — but clamp rather than
+        # switch type: a level-only model rejects `false`, and gpt-oss has no
+        # off switch (specs/model-providers/ollama.md).
+        return _OLLAMA_THINK_MIN_LEVEL if isinstance(value, str) else False
+    return value
+
+
+def _resolve_ollama_reasoning_effort(url: str, model: str, *, tools: Optional[List[Dict]] = None):
+    """Resolve ``reasoning_effort`` for Ollama's /v1 surface, or None to omit.
+
+    Same precedence as the native path (override > /api/show capability >
+    name-pattern fallback) translated to the compat vocabulary. Returning None
+    omits the parameter, which leaves the model's own default in force — that
+    is the right answer for a model we have no opinion about, and the only
+    safe one for a model that does not reason, since an unexpected value is a
+    400 rather than a no-op.
+
+    Note this replaces a `think: false` that never did anything: measured on
+    0.33.3, `think` on /v1 is silently dropped exactly like an unknown
+    parameter, while `reasoning_effort` is honored.
+    """
+    native = _ollama_native_thinking(url, model)
+    override = _ollama_override_for(model, _normalize_reasoning_effort, "compat")
+    if override is not None:
+        value = override
+    elif native is None:
+        # Daemon unreachable: fall back to the name list, and only to say
+        # "this model reasons" — the level stays the model's own default.
+        value = True if _supports_thinking(model) else None
+    else:
+        value = True if native else None
+    if value is None:
+        return None
+    if value is not False and tools and not native and not _is_harmony_model(model):
+        # Same tool-call protection as the native path: suppress only when the
+        # reasoning would land inline in the content and swallow the call. A
+        # model with a reported thinking capability streams it in `reasoning`
+        # instead, which the compat stream handler already demuxes.
+        value = False
+    effort = _normalize_reasoning_effort(value)
+    if effort == _OLLAMA_EFFORT_OFF and _is_harmony_model(model):
+        # Guards the override map, not the branch above: harmony models are
+        # exempt from suppression (their reasoning is already out-of-band), so
+        # the only way to ask gpt-oss for "off" is to configure it. Honour the
+        # intent with the measured floor — gpt-oss ignores "none" and in fact
+        # reasons MORE with it than with "low".
+        return _OLLAMA_THINK_MIN_LEVEL
+    return effort
 
 def _normalize_mistral_content(content):
     """Mistral returns content as a structured array when reasoning is on:
@@ -2015,6 +2292,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
             stream=False, num_ctx=get_context_length(url, model),
+            think=_resolve_ollama_think(url, model),
         )
     else:
         target_url = _normalize_openai_chat_url(url)
@@ -2375,6 +2653,7 @@ async def llm_call_async(
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
             stream=False, num_ctx=get_context_length(url, model),
+            think=_resolve_ollama_think(url, model),
         )
     else:
         target_url = _normalize_openai_chat_url(url)
@@ -2392,9 +2671,11 @@ async def llm_call_async(
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
-        # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
-        if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
-            payload["think"] = False
+        # Reasoning control for Ollama's /v1 surface — same as stream_llm.
+        if _is_ollama_openai_compat_url(url):
+            _effort = _resolve_ollama_reasoning_effort(url, model)
+            if _effort is not None:
+                payload["reasoning_effort"] = _effort
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
         _apply_local_cache_affinity(payload, url, session_id)
@@ -2621,6 +2902,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         payload = _build_ollama_payload(
             model, messages_copy, temperature, max_tokens,
             stream=True, tools=tools, num_ctx=get_context_length(url, model),
+            think=_resolve_ollama_think(url, model, tools=tools),
         )
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
@@ -2651,11 +2933,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         # (high / medium / low / none); default "high".
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
-        # For Ollama's OpenAI-compat /v1 endpoint with thinking models (qwen3,
-        # gemma4, etc.), suppress thinking so tool calls aren't swallowed inside
-        # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
-        if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
-            payload["think"] = False
+        # Reasoning control for Ollama's OpenAI-compat /v1 endpoint. The knob
+        # here is `reasoning_effort`, NOT `think`: measured against 0.33.3,
+        # /v1 drops `think` silently (identical output to sending an unknown
+        # parameter) while honoring `reasoning_effort`. The value is resolved
+        # per model from /api/show plus overrides, and still steps down to a
+        # suppressing level when reasoning would swallow a tool call.
+        if _is_ollama_openai_compat_url(url):
+            _effort = _resolve_ollama_reasoning_effort(url, model, tools=tools)
+            if _effort is not None:
+                payload["reasoning_effort"] = _effort
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
         _scrub_openai_chat_tool_reasoning(payload, target_url, model)

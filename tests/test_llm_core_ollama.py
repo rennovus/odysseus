@@ -322,3 +322,71 @@ def test_stream_llm_threads_discovered_num_ctx(monkeypatch):
     assert seen["num_ctx"] == 32768
     assert seen["stream"] is True
     assert out  # we got the SSE error chunk
+
+
+# ---------------------------------------------------------------------------
+# Native `think` emission and reasoning read-back (native /api/chat surface)
+# ---------------------------------------------------------------------------
+
+def test_native_payload_omits_think_by_default():
+    """No resolved value means no key — a non-reasoning model keeps the exact
+    body it had before thinking control existed."""
+    payload = llm_core._build_ollama_payload(
+        "m", [{"role": "user", "content": "hi"}], 0.0, 0)
+    assert "think" not in payload
+
+
+def test_native_payload_emits_bool_and_level():
+    msgs = [{"role": "user", "content": "hi"}]
+    assert llm_core._build_ollama_payload("m", msgs, 0.0, 0, think=False)["think"] is False
+    assert llm_core._build_ollama_payload("m", msgs, 0.0, 0, think="medium")["think"] == "medium"
+
+
+def test_native_resolution_prefers_daemon_over_name_shape(monkeypatch):
+    """/api/show is the source of truth: a name that matches the legacy
+    pattern list still yields nothing when the daemon says it does not
+    reason."""
+    monkeypatch.setattr(llm_core, "_ollama_native_thinking", lambda u, m: False)
+    assert llm_core._resolve_ollama_think("http://h:11434", "gemma3:12b") is None
+    monkeypatch.setattr(llm_core, "_ollama_native_thinking", lambda u, m: True)
+    assert llm_core._resolve_ollama_think("http://h:11434", "some-unknown:7b") is True
+
+
+def test_native_resolution_falls_back_to_name_list_when_probe_fails(monkeypatch):
+    monkeypatch.setattr(llm_core, "_ollama_native_thinking", lambda u, m: None)
+    assert llm_core._resolve_ollama_think("http://h:11434", "qwen3:8b") is True
+    assert llm_core._resolve_ollama_think("http://h:11434", "llama3:8b") is None
+
+
+def test_native_tool_suppression_clamps_a_level_instead_of_switching_type(monkeypatch):
+    """A level-configured model rejects `false`, so suppression steps down to
+    the floor rather than sending a bool it cannot parse."""
+    monkeypatch.setattr(llm_core, "_ollama_native_thinking", lambda u, m: None)
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {}}}]
+    assert llm_core._resolve_ollama_think(
+        "http://h:11434", "muse-glimmer:30b", tools=tools) == "low"
+    assert llm_core._resolve_ollama_think(
+        "http://h:11434", "qwen3:8b", tools=tools) is False
+
+
+def test_parse_response_surfaces_thinking():
+    """message.thinking is out-of-band; wrap it the way the UI and
+    strip_think already expect rather than dropping it."""
+    assert llm_core._parse_ollama_response(
+        {"message": {"content": "answer"}}) == "answer"
+    assert llm_core._parse_ollama_response(
+        {"message": {"thinking": "why", "content": "answer"}}
+    ) == "<think>why</think>\n\nanswer"
+
+
+def test_parse_response_handles_generate_shape():
+    """/api/generate reports both fields at the top level."""
+    assert llm_core._parse_ollama_response(
+        {"response": "answer", "thinking": "why"}) == "<think>why</think>\n\nanswer"
+
+
+def test_parse_response_output_is_strippable():
+    from src.text_helpers import strip_think
+    raw = llm_core._parse_ollama_response(
+        {"message": {"thinking": "why", "content": "answer"}})
+    assert strip_think(raw) == "answer"

@@ -47,6 +47,20 @@ def _capability_tokens(values: Any) -> tuple[str, ...]:
     return tuple(out)
 
 
+def thinking_from_show_payload(payload: Any) -> bool:
+    """True when /api/show reports native thinking for this model.
+
+    Ollama lists ``thinking`` in ``capabilities[]`` only for models that accept
+    the ``think`` request parameter *and* return reasoning out-of-band in
+    ``message.thinking``; a model that merely emits inline ``<think>`` prose is
+    not marked. Runtime thinking control keys off this rather than the model
+    name — see ``_resolve_ollama_think`` in src/llm_core.py.
+
+    Parser only: the caller owns the /api/show request.
+    """
+    return mc.CAP_REASONING in _capability_tokens(as_mapping(payload).get("capabilities"))
+
+
 def _family_from_ollama_capabilities(values: Any) -> str:
     tokens = {compact_str(value).lower().replace("-", "_") for value in as_list(values)}
     if tokens and tokens.issubset({"embedding", "embeddings"}):
