@@ -419,6 +419,9 @@ class ChatProcessor:
                         temperature=0.1,
                         max_tokens=50,
                         timeout=15,
+                        # 50 tokens is a query-sized budget; a reasoning model
+                        # spends all of it thinking and emits no query at all.
+                        reasoning_effort="none",
                     )
                     # max_tokens=50 is a query-sized budget: a reasoning model
                     # spends it all thinking and the query never arrives. Strip

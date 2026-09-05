@@ -374,7 +374,10 @@ def analyze_image_with_vl_result(image_path: str, owner: str | None = None) -> d
         for i, (_url, _model, _headers) in enumerate([c for c in _vl_candidates if c and c[0] and c[1]]):
             try:
                 description = strip_think(
-                    llm_call(_url, _model, vl_messages, headers=_headers, timeout=120))
+                    llm_call(_url, _model, vl_messages, headers=_headers, timeout=120,
+                             # The description is stored verbatim as document
+                             # text; nothing reads the model's deliberation.
+                             reasoning_effort="none"))
                 logger.info("VL analysis complete with model %s", _model)
                 return {"text": description, "model": _model}
             except Exception as e:

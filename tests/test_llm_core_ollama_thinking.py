@@ -291,3 +291,49 @@ class TestVocabularySplit:
         payload = llm_core._build_ollama_payload(
             "m", [{"role": "user", "content": "hi"}], 0.7, 100, think="xhigh")
         assert "think" not in payload
+
+
+class TestCallerRequestedEffort:
+    """A caller can state what reasoning its workload is worth."""
+
+    def _payload(self, monkeypatch, model, requested, thinking=True):
+        captured = {}
+
+        def fake_post(url, h, **kw):
+            captured.update(kw.get("json") or {})
+            raise RuntimeError("stop after payload build")
+
+        monkeypatch.setattr(llm_core, "_ollama_native_thinking", lambda u, m: thinking)
+        monkeypatch.setattr(llm_core, "httpx_post_kimi_aware", fake_post)
+        monkeypatch.setattr(llm_core, "note_model_activity", lambda *a, **k: None)
+        monkeypatch.setattr(llm_core, "_get_cached_response", lambda k: None)
+        try:
+            llm_core.llm_call(V1, model, [{"role": "user", "content": "hi"}],
+                              reasoning_effort=requested)
+        except Exception:
+            pass
+        return captured
+
+    def test_requested_outranks_the_override_map(self, monkeypatch):
+        """muse-glimmer is configured "medium"; the caller asks for none."""
+        payload = self._payload(monkeypatch, "muse-glimmer:30b", "none")
+        assert payload.get("reasoning_effort") == "none"
+
+    def test_requested_outranks_the_capability_probe(self, monkeypatch):
+        """A thinking-capable model with no override would omit the parameter."""
+        payload = self._payload(monkeypatch, "qwen3:14b", "none")
+        assert payload.get("reasoning_effort") == "none"
+
+    def test_requested_still_clamps_for_a_model_with_no_off_switch(self, monkeypatch):
+        """Asking gpt-oss for off gets the floor, not a value it ignores."""
+        payload = self._payload(monkeypatch, "gpt-oss:20b", "none")
+        assert payload.get("reasoning_effort") == "low"
+
+    def test_unusable_value_falls_back_to_normal_resolution(self, monkeypatch):
+        """A bad level must not reach the wire — it 400s the whole request."""
+        payload = self._payload(monkeypatch, "muse-glimmer:30b", "bogus")
+        assert payload.get("reasoning_effort") == "medium"
+
+    def test_omitted_keeps_resolver_behaviour(self, monkeypatch):
+        payload = self._payload(monkeypatch, "muse-glimmer:30b", None)
+        assert payload.get("reasoning_effort") == "medium"

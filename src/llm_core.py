@@ -1684,7 +1684,21 @@ def _resolve_ollama_think(url: str, model: str, *, tools: Optional[List[Dict]] =
     return value
 
 
-def _resolve_ollama_reasoning_effort(url: str, model: str, *, tools: Optional[List[Dict]] = None):
+def _clamp_effort(effort, model: str):
+    """Hold a requested "off" to the lowest level a model can actually reach.
+
+    gpt-oss has no off switch: it ignores "none" and in fact reasons MORE with
+    it (96 chars) than with "low" (25). Anything that resolves to off for such
+    a model gets the measured floor instead, whether it came from the override
+    map or from a caller.
+    """
+    if effort == _OLLAMA_EFFORT_OFF and _is_harmony_model(model):
+        return _OLLAMA_THINK_MIN_LEVEL
+    return effort
+
+
+def _resolve_ollama_reasoning_effort(url: str, model: str, *, tools: Optional[List[Dict]] = None,
+                                     requested: Optional[str] = None):
     """Resolve ``reasoning_effort`` for Ollama's /v1 surface, or None to omit.
 
     Same precedence as the native path (override > /api/show capability >
@@ -1697,7 +1711,23 @@ def _resolve_ollama_reasoning_effort(url: str, model: str, *, tools: Optional[Li
     Note this replaces a `think: false` that never did anything: measured on
     0.33.3, `think` on /v1 is silently dropped exactly like an unknown
     parameter, while `reasoning_effort` is honored.
+
+    ``requested`` is a caller-supplied level that outranks both the override
+    map and the capability probe: a workload that consumes only the final line
+    of a reply knows better than the model's default what reasoning is worth
+    there. It still goes through this surface's vocabulary check and the
+    no-off-switch clamp, and an unusable value falls back to normal resolution
+    rather than failing the request.
     """
+    if requested is not None:
+        value = _normalize_reasoning_effort(requested)
+        if value is None:
+            logger.warning(
+                "Ignoring reasoning_effort %r for %s — not valid on the compat surface",
+                requested, model,
+            )
+        else:
+            return _clamp_effort(value, model)
     native = _ollama_native_thinking(url, model)
     override = _ollama_override_for(model, _normalize_reasoning_effort, "compat")
     if override is not None:
@@ -1716,15 +1746,7 @@ def _resolve_ollama_reasoning_effort(url: str, model: str, *, tools: Optional[Li
         # model with a reported thinking capability streams it in `reasoning`
         # instead, which the compat stream handler already demuxes.
         value = False
-    effort = _normalize_reasoning_effort(value)
-    if effort == _OLLAMA_EFFORT_OFF and _is_harmony_model(model):
-        # Guards the override map, not the branch above: harmony models are
-        # exempt from suppression (their reasoning is already out-of-band), so
-        # the only way to ask gpt-oss for "off" is to configure it. Honour the
-        # intent with the measured floor — gpt-oss ignores "none" and in fact
-        # reasons MORE with it than with "low".
-        return _OLLAMA_THINK_MIN_LEVEL
-    return effort
+    return _clamp_effort(_normalize_reasoning_effort(value), model)
 
 def _normalize_mistral_content(content):
     """Mistral returns content as a structured array when reasoning is on:
@@ -2245,8 +2267,18 @@ def normalize_model_id(
 
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
-             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
-    """Synchronous LLM call with optional prompt type enhancement."""
+             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
+             reasoning_effort: Optional[str] = None) -> str:
+    """Synchronous LLM call with optional prompt type enhancement.
+
+    ``reasoning_effort`` lets a caller state how much reasoning its workload
+    is actually worth, overriding what the model would otherwise be given.
+    It applies to Ollama's OpenAI-compat /v1 surface, where that parameter is
+    the one the daemon honors; other providers ignore it. Values are the
+    compat vocabulary (minimal/low/medium/high/xhigh/ultra/max/none), and one
+    outside it is logged and dropped rather than sent, since an unknown value
+    fails the whole request there.
+    """
     h = _provider_headers(_detect_provider(url))
     # Tolerate headers that arrive as a JSON string (some sessions stored them
     # double-encoded) — otherwise h.update() throws "dictionary update sequence
@@ -2316,7 +2348,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         # reasoning on utility calls (document description, search-query
         # generation) that only ever use the final line.
         if _is_ollama_openai_compat_url(url):
-            _effort = _resolve_ollama_reasoning_effort(url, model)
+            _effort = _resolve_ollama_reasoning_effort(url, model, requested=reasoning_effort)
             if _effort is not None:
                 payload["reasoning_effort"] = _effort
         if provider == "mistral" and _supports_thinking(model):
