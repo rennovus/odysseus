@@ -36,6 +36,7 @@ async def chat_with_model(content: str, session_id: Optional[str] = None, owner:
     """
     from src.ai_interaction import _resolve_model, AI_CHAT_TIMEOUT
     from src.llm_core import llm_call_async
+    from src.text_helpers import strip_think
 
     lines = content.strip().split("\n", 1)
     if not lines or not lines[0].strip():
@@ -58,7 +59,9 @@ async def chat_with_model(content: str, session_id: Optional[str] = None, owner:
             headers=headers,
             timeout=AI_CHAT_TIMEOUT,
         )
-        # Truncate very long responses
+        # Strip before truncating: reasoning counts against the same budget,
+        # so a thinking model's actual answer is what gets cut off.
+        response = strip_think(response)
         if len(response) > 10000:
             response = response[:10000] + "\n... (truncated)"
         return {"model": model, "response": response}
@@ -79,6 +82,7 @@ async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Opt
     """
     from src.ai_interaction import _resolve_model, AI_CHAT_TIMEOUT
     from src.llm_core import llm_call_async
+    from src.text_helpers import strip_think
     from src.settings import get_setting
 
     lines = content.strip().split("\n", 1)
@@ -108,6 +112,7 @@ async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Opt
             headers=headers,
             timeout=AI_CHAT_TIMEOUT,
         )
+        response = strip_think(response)
         if len(response) > 8000:
             response = response[:8000] + "\n... (truncated)"
         return {"model": model, "response": response, "teacher": True}

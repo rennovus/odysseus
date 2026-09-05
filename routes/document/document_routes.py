@@ -971,6 +971,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         from src.task_endpoint import resolve_task_endpoint
         from src.endpoint_resolver import resolve_endpoint
         from src.llm_core import llm_call_async
+        from src.text_helpers import strip_think
 
         user = get_current_user(request)
         url, model, headers = resolve_task_endpoint(owner=user or None)
@@ -1021,8 +1022,10 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 timeout=30,
             )
 
-            # Parse verdicts
+            # Parse verdicts. Strip reasoning first: a <think> block can
+            # contain its own [...] that the scan below would match instead.
             import re
+            response = strip_think(response)
             match = re.search(r'\[.*?\]', response, re.DOTALL)
             if not match:
                 raise HTTPException(500, "AI returned invalid response")
@@ -1250,6 +1253,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         from src.pdf_form_doc import find_source_upload_id
         from src.document_processor import _resolve_vl_model, _load_vl_settings
         from src.llm_core import llm_call_async
+        from src.text_helpers import strip_think
 
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
         instruction = (body or {}).get("instruction", "").strip()
@@ -1331,7 +1335,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                     logger.error(f"VL call failed on page {page_index + 1}: {e}")
                     continue
 
-                raw = (raw or "").strip()
+                raw = strip_think(raw or "")
                 if raw.startswith("```"):
                     raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
                 try:

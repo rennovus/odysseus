@@ -134,6 +134,7 @@ async def _eval_skill_run(skill_md: str, task: str, transcript: str,
     """
     import json as _json
     import re as _re
+    from src.text_helpers import strip_think as _strip_think
     from src.llm_core import llm_call_async
 
     sys_prompt = (
@@ -182,12 +183,11 @@ async def _eval_skill_run(skill_md: str, task: str, transcript: str,
 
     def _parse(raw: str):
         """Return a final result dict on success, or None if unparseable."""
-        text = (raw or '')
-        # Strip closed think blocks. If a <think> was opened but never closed
-        # (the model ran out of budget mid-reasoning), drop everything from it
-        # onward so its stray braces don't poison JSON extraction.
-        text = _re.sub(r'<think(?:ing)?>[\s\S]*?</think(?:ing)?>', '', text, flags=_re.I)
-        text = _re.sub(r'<think(?:ing)?>[\s\S]*$', '', text, flags=_re.I).strip()
+        # Strip think blocks, including one opened but never closed (the model
+        # ran out of budget mid-reasoning), so stray braces don't poison JSON
+        # extraction. strip_think also handles <think time="…"> attributes and
+        # the Gemma channel form the local regexes missed.
+        text = _strip_think(raw or '')
 
         def _coerce(d):
             return d if (isinstance(d, dict) and "verdict" in d) else None
@@ -287,6 +287,7 @@ async def _eval_skill_necessity(skill_md: str, others: list, url: str, model: st
     purely a flag the UI surfaces."""
     import json as _json
     import re as _re
+    from src.text_helpers import strip_think as _strip_think
     from src.llm_core import llm_call_async
 
     catalog = "\n".join(f"- {o.get('name')}: {o.get('description', '')}" for o in others) or "(no other skills)"
@@ -314,8 +315,7 @@ async def _eval_skill_necessity(skill_md: str, others: list, url: str, model: st
     except Exception as e:
         logger.warning(f"Necessity check failed: {e}")
         return None
-    text = _re.sub(r'<think(?:ing)?>[\s\S]*?</think(?:ing)?>', '', (raw or ''), flags=_re.I)
-    text = _re.sub(r'<think(?:ing)?>[\s\S]*$', '', text, flags=_re.I).strip()
+    text = _strip_think(raw or '')
     data = None
     a, b = text.find('{'), text.rfind('}')
     if a >= 0 and b > a:
@@ -370,6 +370,7 @@ async def _eval_skill_retrieval_precision(skill_md: str, others: list,
     """
     import json as _json
     import re as _re
+    from src.text_helpers import strip_think as _strip_think
     from src.llm_core import llm_call_async
 
     catalog = "\n".join(f"- {o.get('name')}: {o.get('description', '')}" for o in others[:80]) or "(no other skills)"
@@ -402,8 +403,7 @@ async def _eval_skill_retrieval_precision(skill_md: str, others: list,
     except Exception as e:
         logger.warning(f"Retrieval precision check failed: {e}")
         return None
-    text = _re.sub(r'<think(?:ing)?>[\s\S]*?</think(?:ing)?>', '', (raw or ''), flags=_re.I)
-    text = _re.sub(r'<think(?:ing)?>[\s\S]*$', '', text, flags=_re.I).strip()
+    text = _strip_think(raw or '')
     data = None
     a, b = text.find('{'), text.rfind('}')
     if a >= 0 and b > a:
@@ -807,6 +807,7 @@ async def _improve_skill_md(skill_md: str, verdict: dict, transcript: str, url, 
     """Have a model rewrite SKILL.md to fix the reviewer's issues. Returns the
     corrected markdown, or None if it couldn't produce a usable change."""
     import re as _re
+    from src.text_helpers import strip_think as _strip_think
     from src.llm_core import llm_call_async
     issues = "\n".join("- " + str(i) for i in (verdict.get("issues") or []))
     sys_prompt = (
@@ -836,9 +837,9 @@ async def _improve_skill_md(skill_md: str, verdict: dict, transcript: str, url, 
     except Exception as e:
         logger.warning(f"Audit: improve call failed: {e}")
         return None
-    text = _re.sub(r'<think(?:ing)?>[\s\S]*?</think(?:ing)?>', '', (raw or ''), flags=_re.I)
-    text = _re.sub(r'<think(?:ing)?>[\s\S]*$', '', text, flags=_re.I)
-    text = _re.sub(r'</think(?:ing)?>', '', text, flags=_re.I).strip()
+    # strip_think handles the closed block, one left unclosed by the token
+    # cap, and the stray closer some models emit with no opener.
+    text = _strip_think(raw or '')
     if text.startswith("```"):
         text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     # Some reasoning models still prepend analysis or echo the old skill before

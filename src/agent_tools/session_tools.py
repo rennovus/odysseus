@@ -168,6 +168,7 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
     """
     _session_manager = get_session_manager()
     from src.llm_core import llm_call_async
+    from src.text_helpers import strip_think
     from core.models import ChatMessage
 
     if not _session_manager:
@@ -225,11 +226,14 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             timeout=AI_CHAT_TIMEOUT,
         )
 
-        # Save both messages to session
+        # Save both messages to session. The stored turn keeps its <think>
+        # block — the chat UI renders that as the thinking panel — but the
+        # tool result handed back to the agent does not need the reasoning.
         sess.add_message(ChatMessage("user", message))
         sess.add_message(ChatMessage("assistant", response))
 
         # Truncate for tool output
+        response = strip_think(response)
         if len(response) > 10000:
             response = response[:10000] + "\n... (truncated)"
 

@@ -234,6 +234,7 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
       ...
     """
     from src.llm_core import llm_call_async
+    from src.text_helpers import strip_think
 
     # Try JSON parse first
     steps = None
@@ -299,6 +300,10 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
             response = await llm_call_async(
                 url, model, messages, headers=headers, timeout=AI_CHAT_TIMEOUT
             )
+            # Each step's output becomes the next step's input, so reasoning
+            # left in place compounds down the pipeline and lands in the
+            # rendered result.
+            response = strip_think(response)
 
             step_outputs.append({
                 "step": i + 1,

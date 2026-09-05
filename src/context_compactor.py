@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from src.model_context import get_context_length, estimate_tokens
 from src.llm_core import llm_call_async
+from src.text_helpers import strip_think
 from src.endpoint_resolver import resolve_endpoint
 from core.models import ChatMessage
 
@@ -72,8 +73,14 @@ Keep the summary under 1000 tokens. Be dense — every token should carry inform
 
 
 def normalize_compaction_summary(summary: str) -> str:
-    """Remove redundant leading title text before adding our wrapper."""
-    text = (summary or "").strip()
+    """Remove reasoning and redundant leading title text before wrapping.
+
+    A summary is replayed as conversation context on every later turn, so a
+    <think> block left in front of it spends the context budget on the
+    model's scratch work. Reasoning models emit one inline; native Ollama
+    surfaces one on the non-streaming path too.
+    """
+    text = strip_think(summary or "")
     text = re.sub(r"^(?:#{1,3}\s*)?Conversation Summary\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^\*\*Conversation Summary\*\*\s*", "", text, flags=re.IGNORECASE)
     return text.lstrip()

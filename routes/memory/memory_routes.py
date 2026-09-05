@@ -26,6 +26,7 @@ from core.session_manager import SessionManager
 from src.request_models import MemoryAddRequest
 from core.database import SessionLocal
 from src.llm_core import llm_call_async
+from src.text_helpers import strip_think
 from services.memory.memory_extractor import audit_memories
 from src.auth_helpers import get_current_user, require_user
 from src.endpoint_resolver import resolve_endpoint
@@ -271,7 +272,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 headers=t_headers,
             )
             try:
-                suggestions = json.loads(suggestion_text)
+                suggestions = json.loads(strip_think(suggestion_text))
                 if isinstance(suggestions, list):
                     suggestions = [s if isinstance(s, str) else s.get("text", "") for s in suggestions]
                 else:
@@ -466,8 +467,9 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 headers=headers,
             )
 
-            # Parse JSON
-            raw = raw.strip()
+            # Parse JSON — reasoning first, so a <think> block's braces and
+            # any fence inside it can't derail the extraction.
+            raw = strip_think(raw)
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 

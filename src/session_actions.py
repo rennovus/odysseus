@@ -189,8 +189,10 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
             logger.warning(f"Auto-sort LLM call failed: {e}")
             return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Folder sort skipped (model unreachable)."
 
-        # Parse JSON from response
-        text = raw.strip()
+        # Parse JSON from response. Strip reasoning first: a <think> block
+        # is full of braces that derail the JSON extraction below.
+        from src.text_helpers import strip_think
+        text = strip_think(raw)
         result = None
         try:
             result = json.loads(text)

@@ -393,6 +393,7 @@ class ChatProcessor:
         if use_web:
             try:
                 from src.llm_core import llm_call
+                from src.text_helpers import strip_think
 
                 t_url, t_model, t_headers = session.endpoint_url, session.model, session.headers
 
@@ -418,7 +419,12 @@ class ChatProcessor:
                         temperature=0.1,
                         max_tokens=50,
                         timeout=15,
-                    ).strip()
+                    )
+                    # max_tokens=50 is a query-sized budget: a reasoning model
+                    # spends it all thinking and the query never arrives. Strip
+                    # first so the empty result falls back below instead of
+                    # searching for the model's scratch work.
+                    generated_query = strip_think(generated_query)
 
                     if generated_query:
                         # LLM successfully generated a non-empty query -> use the generated query

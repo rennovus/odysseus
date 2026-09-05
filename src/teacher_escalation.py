@@ -240,8 +240,9 @@ async def _call_teacher(teacher_model_spec: str, prompt: str,
     except Exception as e:
         logger.warning(f"teacher endpoint not resolvable ({teacher_model_spec!r}): {e}")
         return None
+    from src.text_helpers import strip_think
     try:
-        return await llm_call_async(
+        return strip_think(await llm_call_async(
             url, model,
             [
                 {"role": "system", "content": _TEACHER_SYSTEM_PROMPT},
@@ -249,7 +250,7 @@ async def _call_teacher(teacher_model_spec: str, prompt: str,
             ],
             headers=headers,
             timeout=120,
-        )
+        ))
     except Exception as e:
         logger.warning(f"teacher call failed: {e}")
         return None
@@ -422,7 +423,9 @@ async def evaluate_turn_llm(
             timeout=20,
         )
         if response:
-            cleaned_response = response.strip().strip("'\"").lower()
+            # Exact-match verdict: any reasoning prefix makes this never fire.
+            from src.text_helpers import strip_think
+            cleaned_response = strip_think(response).strip("'\"").lower()
             if cleaned_response == "failure":
                 return ("failure", f"LLM evaluation flagged failure: {response.strip()}")
     except Exception as e:

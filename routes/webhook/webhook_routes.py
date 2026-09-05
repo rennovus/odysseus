@@ -245,6 +245,7 @@ def setup_webhook_routes(
 
         from core.models import ChatMessage
         from src.llm_core import llm_call_async
+        from src.text_helpers import strip_think
         from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, normalize_base
 
         message = body.message.strip()
@@ -382,8 +383,11 @@ def setup_webhook_routes(
             sess.endpoint_url, sess.model, messages,
             headers=sess.headers, timeout=120,
         )
+        # The stored turn keeps its <think> block for the chat UI; the API
+        # response and the webhook payload get the visible answer only.
         sess.add_message(ChatMessage("assistant", reply))
         session_manager.save_sessions()
+        reply = strip_think(reply)
 
         webhook_manager.fire_and_forget("chat.completed", {
             "session_id": session_id, "model": sess.model,

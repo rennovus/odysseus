@@ -986,6 +986,7 @@ def setup_session_routes(
         from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT
         from src.endpoint_resolver import resolve_endpoint
         from src.llm_core import llm_call_async
+        from src.text_helpers import strip_think
 
         owner = getattr(session, "owner", None) or effective_user(request)
         url, model, headers = resolve_endpoint("utility", owner=owner)
@@ -1023,7 +1024,7 @@ def setup_session_routes(
 
         summary_msg = ChatMessage(
             role="system",
-            content=f"[Conversation summary]\n{summary}",
+            content=f"[Conversation summary]\n{strip_think(summary)}",
             metadata={
                 "compacted": True,
                 "summarized_count": len(older),
@@ -1227,10 +1228,12 @@ def setup_session_routes(
             logger.info(f"Auto-sort raw response ({len(raw)} chars): {raw[:300]}")
             # Extract JSON from response — handle markdown fences, leading text,
             # reasoning-model <think> blocks, and trailing commas.
-            text = raw.strip()
             # Reasoning models emit <think>…</think> (often containing { } that
             # would derail the brace scan) before the answer — drop it first.
-            text = re.sub(r'<think(?:ing)?>[\s\S]*?</think(?:ing)?>', '', text, flags=re.I).strip()
+            # strip_think also covers a block left unclosed by the token cap,
+            # <think time="…"> attributes, and the Gemma channel form.
+            from src.text_helpers import strip_think as _strip_think
+            text = _strip_think(raw)
 
             def _loads_lenient(s):
                 """Parse JSON, retrying once with trailing commas stripped."""
