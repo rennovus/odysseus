@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from core.middleware import INTERNAL_TOOL_USER
 from src.endpoint_resolver import resolve_endpoint
+from src.model_name_heuristics import first_chat_model
 from src.auth_helpers import _auth_disabled, get_current_user
 from src.owner_identity import REQUEST_SENTINEL_OWNERS
 from src.constants import DEEP_RESEARCH_DIR
@@ -71,15 +72,6 @@ def _find_owned_research_path(session_id: str, user: str) -> Path | None:
 
 logger = logging.getLogger(__name__)
 
-# Model-name substrings that are NOT chat/generation models — research must
-# never pick these as its model. An OpenAI-style endpoint often lists
-# `text-embedding-ada-002` etc. first in its model list, which is why research
-# was failing with "Cannot reach model 'text-embedding-ada-002'".
-_NON_CHAT_MODEL = (
-    "text-embedding", "embedding", "tts-", "whisper", "dall-e",
-    "moderation", "rerank", "reranker", "clip", "stable-diffusion",
-)
-
 _RESEARCH_IMAGE_BLOCKLIST = {
     "cdn.shopify.com/s/files/1/0179/4388/7926/files/icon.png",
 }
@@ -131,10 +123,7 @@ def _research_thumbnail(data: dict) -> str:
 
 def _first_chat_model(models) -> str:
     """First model that isn't an embedding/tts/etc. — falls back to models[0]."""
-    for m in (models or []):
-        if not any(p in str(m).lower() for p in _NON_CHAT_MODEL):
-            return m
-    return (models[0] if models else "")
+    return first_chat_model(models, default="")
 
 
 def _resolve_research_endpoint(sess, owner: Optional[str] = None) -> tuple:

@@ -21,6 +21,7 @@ from core.log_safety import redact_url as _redact_url_for_log
 from core.middleware import require_admin
 from src.constants import COOKBOOK_STATE_FILE
 from src.llm_core import _detect_provider, _host_match, ANTHROPIC_MODELS
+from src.model_name_heuristics import is_chat_model as _is_chat_model
 from src.tls_overrides import llm_verify
 from src.settings import load_settings as _load_settings, save_settings as _save_settings
 from src.endpoint_resolver import (
@@ -593,48 +594,6 @@ def _is_ollama_base(base_url: str) -> bool:
         return parsed.port == 11434 or "ollama" in host
     except Exception:
         return "ollama" in (base_url or "").lower()
-
-
-# Prefixes/substrings for models that are NOT chat-completions-capable
-_NON_CHAT_PREFIXES = (
-    "dall-e", "tts-", "whisper", "text-embedding", "embedding",
-    "davinci", "babbage", "moderation", "omni-moderation",
-    "sora", "gpt-image", "chatgpt-image",
-    # embedding / retrieval / non-chat models (common across providers)
-    "snowflake/arctic-embed", "nvidia/nv-embed", "embed",
-)
-_NON_CHAT_CONTAINS = (
-    "-realtime", "-transcribe", "-tts", "-codex",
-    "codex-", "content-safety", "-safety", "-reward", "nvclip",
-    "kosmos", "fuyu", "deplot", "vila", "neva",
-    "gliner", "riva", "-parse", "-embedqa", "-nemoretriever",
-    "topic-control", "calibration",
-    "ai-synthetic-video", "cosmos-reason2",
-    "bge", "llama-guard",
-)
-_NON_CHAT_EXACT_PREFIXES = (
-    "gpt-audio",  # gpt-audio, gpt-audio-mini etc. (not gpt-4o-audio-preview which is chat)
-    "gpt-3.5-turbo-instruct",  # legacy OpenAI completions model
-)
-
-
-def _is_chat_model(model_id: str) -> bool:
-    """Return True if the model ID looks like a chat/completions-capable model."""
-    if not isinstance(model_id, str):
-        # Non-compliant upstreams can return non-string IDs (e.g. int/None);
-        # treat them as chat-capable rather than crashing on .lower().
-        return True
-    mid = model_id.lower()
-    for prefix in _NON_CHAT_PREFIXES:
-        if mid.startswith(prefix):
-            return False
-    for prefix in _NON_CHAT_EXACT_PREFIXES:
-        if mid.startswith(prefix):
-            return False
-    for substr in _NON_CHAT_CONTAINS:
-        if substr in mid:
-            return False
-    return True
 
 
 def _delete_orphaned_provider_auth(db, auth_id: Optional[str], exclude_ep_id: Optional[str] = None) -> bool:

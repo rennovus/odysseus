@@ -14,18 +14,9 @@ from urllib.parse import urlparse, urlunparse
 
 from core.database import SessionLocal, ModelEndpoint
 from src.llm_core import _detect_provider, _host_match, _is_kimi_code_url, KIMI_CODE_USER_AGENT, _ollama_api_root
+from src.model_name_heuristics import first_chat_model
 
 logger = logging.getLogger(__name__)
-
-# Model-name substrings that are NOT chat/generation models. When an endpoint
-# has no explicit model configured we pick the first CHAT model from its list —
-# never an embedding/tts/etc. (an OpenAI-style endpoint often lists
-# `text-embedding-ada-002` first, which silently broke email-summarize and
-# other resolve_endpoint callers with "Cannot reach model").
-_NON_CHAT_MODEL = (
-    "text-embedding", "embedding", "tts-", "whisper", "dall-e",
-    "moderation", "rerank", "reranker", "clip", "stable-diffusion",
-)
 
 
 def endpoint_cost_tracked(url: str, endpoint_kind: Optional[str] = None) -> bool:
@@ -66,11 +57,15 @@ def endpoint_cost_tracked(url: str, endpoint_kind: Optional[str] = None) -> bool
 
 
 def _first_chat_model(models) -> Optional[str]:
-    """First model that isn't an embedding/tts/etc.; falls back to models[0]."""
-    for m in (models or []):
-        if not any(p in str(m).lower() for p in _NON_CHAT_MODEL):
-            return m
-    return (models[0] if models else None)
+    """First model that isn't an embedding/tts/etc.; falls back to models[0].
+
+    When an endpoint has no explicit model configured we pick the first CHAT
+    model from its list — never an embedding/tts/etc. (an OpenAI-style endpoint
+    often lists `text-embedding-ada-002` first, which silently broke
+    email-summarize and other resolve_endpoint callers with "Cannot reach
+    model").
+    """
+    return first_chat_model(models)
 
 
 def _endpoint_cached_models(ep) -> list:
